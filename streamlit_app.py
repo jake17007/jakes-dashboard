@@ -21,12 +21,19 @@ if 'OPENAI_API_KEY' not in os.environ:
 # Initialize Firebase using Streamlit's caching
 db = initialize_firebase()
 
-def aggregate_hourly(df):
+def aggregate_data(df, granularity):
     # Convert 'dt' to datetime if it's not already
     df['dt'] = pd.to_datetime(df['dt'])
     
-    # Create a new column for the hourly timestamp
-    df['hour'] = df['dt'].dt.floor('H')
+    # Adjust granularity
+    if granularity == 'Hourly':
+        df['period'] = df['dt'].dt.floor('H')
+    elif granularity == 'Daily':
+        df['period'] = df['dt'].dt.floor('D')
+    elif granularity == 'Weekly':
+        df['period'] = df['dt'].dt.to_period('W').apply(lambda r: r.start_time)
+    elif granularity == 'Minutely':
+        df['period'] = df['dt'].dt.floor('T')
     
     # Separate dataframes for cannabis use and mood score
     cannabis_df = df[df['event_type'] == 'cannabis_use_since_last_update_grams']
@@ -36,25 +43,25 @@ def aggregate_hourly(df):
     cannabis_df['value'] = pd.to_numeric(cannabis_df['value'], errors='coerce')
     mood_df['value'] = pd.to_numeric(mood_df['value'], errors='coerce')
     
-    # Aggregate cannabis use (sum)
-    cannabis_hourly = cannabis_df.groupby('hour')['value'].sum().reset_index()
-    cannabis_hourly.columns = ['dt', 'cannabis_grams']
+    # Aggregate cannabis use (sum for each period)
+    cannabis_agg = cannabis_df.groupby('period')['value'].sum().reset_index()
+    cannabis_agg.columns = ['dt', 'cannabis_grams']
     
-    # Aggregate mood score (average)
-    mood_hourly = mood_df.groupby('hour')['value'].mean().reset_index()
-    mood_hourly.columns = ['dt', 'mood_score']
+    # Aggregate mood score (average for each period)
+    mood_agg = mood_df.groupby('period')['value'].mean().reset_index()
+    mood_agg.columns = ['dt', 'mood_score']
     
     # Merge the two aggregated dataframes
-    hourly_df = pd.merge(cannabis_hourly, mood_hourly, on='dt', how='outer')
+    agg_df = pd.merge(cannabis_agg, mood_agg, on='dt', how='outer')
     
     # Sort by datetime
-    hourly_df = hourly_df.sort_values('dt')
+    agg_df = agg_df.sort_values('dt')
     
     # Replace NaN with 0 for cannabis_grams and with the overall mean for mood_score
-    hourly_df['cannabis_grams'] = hourly_df['cannabis_grams'].fillna(0)
-    hourly_df['mood_score'] = hourly_df['mood_score'].fillna(hourly_df['mood_score'].mean())
+    agg_df['cannabis_grams'] = agg_df['cannabis_grams'].fillna(0)
+    agg_df['mood_score'] = agg_df['mood_score'].fillna(agg_df['mood_score'].mean())
     
-    return hourly_df
+    return agg_df
 
 def main():
     st.title("Cannabis Use and Mood Tracker")
@@ -73,31 +80,43 @@ def main():
         st.subheader("Raw Data")
         st.write(quant_df)
         
-        # Aggregate data hourly
-        hourly_df = aggregate_hourly(quant_df)
+        # Period granularity selection
+        st.subheader("Select Period Granularity")
+        granularity = st.selectbox("Granularity", ['Minutely', 'Hourly', 'Daily', 'Weekly'])
+        
+        # Aggregate data based on the selected granularity
+        aggregated_df = aggregate_data(quant_df, granularity)
+        
+        # Date range selection
+        st.subheader("Select Date Range")
+        min_date = st.date_input("Start date", value=aggregated_df['dt'].min().date())
+        max_date = st.date_input("End date", value=aggregated_df['dt'].max().date())
+
+        # Filter the dataframe based on the selected dates
+        filtered_df = aggregated_df[(aggregated_df['dt'].dt.date >= min_date) & (aggregated_df['dt'].dt.date <= max_date)]
         
         # Display aggregated data
-        st.subheader("Hourly Aggregated Data")
-        st.write(hourly_df)
+        st.subheader("Aggregated Data")
+        st.write(filtered_df)
 
         # Create line charts
-        st.subheader("Quantitative Metrics Over Time (Hourly)")
+        st.subheader("Quantitative Metrics Over Time")
 
         # Cannabis Use Chart
-        st.subheader("Cannabis Use Over Time (grams per hour)")
+        st.subheader(f"Cannabis Use Over Time (grams per {granularity.lower()})")
         st.line_chart(
-            hourly_df,
+            filtered_df,
             x='dt',
             y='cannabis_grams',
             x_label='Date',
-            y_label='Cannabis Use (grams)',
+            y_label=f'Cannabis Use (grams)',
             use_container_width=True
         )
 
         # Mood Score Chart
-        st.subheader("Average Mood Score Over Time (per hour)")
+        st.subheader(f"Average Mood Score Over Time (per {granularity.lower()})")
         st.line_chart(
-            hourly_df,
+            filtered_df,
             x='dt',
             y='mood_score',
             x_label='Date',
