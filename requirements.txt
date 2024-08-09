@@ -1,2 +1,5 @@
 streamlit
 pandas
+firebase-admin
+openai
+python-dotenv

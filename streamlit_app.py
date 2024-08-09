@@ -1,151 +1,112 @@
+# File: streamlit_app.py
+
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+from cannabis_mood_tracker import update_user_data, get_quantitative_metrics, initialize_firebase
+import os
+from dotenv import load_dotenv
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Load environment variables
+load_dotenv()
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Check for environment variables
+if 'FIREBASE_CREDENTIALS' not in os.environ:
+    st.error("Firebase credentials path not found. Please set the FIREBASE_CREDENTIALS_PATH environment variable.")
+    st.stop()
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+if 'OPENAI_API_KEY' not in os.environ:
+    st.error("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+    st.stop()
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Initialize Firebase using Streamlit's caching
+db = initialize_firebase()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def aggregate_hourly(df):
+    # Convert 'dt' to datetime if it's not already
+    df['dt'] = pd.to_datetime(df['dt'])
+    
+    # Create a new column for the hourly timestamp
+    df['hour'] = df['dt'].dt.floor('H')
+    
+    # Separate dataframes for cannabis use and mood score
+    cannabis_df = df[df['event_type'] == 'cannabis_use_since_last_update_grams']
+    mood_df = df[df['event_type'] == 'mood_score']
+    
+    # Convert 'value' to numeric, coercing errors to NaN
+    cannabis_df['value'] = pd.to_numeric(cannabis_df['value'], errors='coerce')
+    mood_df['value'] = pd.to_numeric(mood_df['value'], errors='coerce')
+    
+    # Aggregate cannabis use (sum)
+    cannabis_hourly = cannabis_df.groupby('hour')['value'].sum().reset_index()
+    cannabis_hourly.columns = ['dt', 'cannabis_grams']
+    
+    # Aggregate mood score (average)
+    mood_hourly = mood_df.groupby('hour')['value'].mean().reset_index()
+    mood_hourly.columns = ['dt', 'mood_score']
+    
+    # Merge the two aggregated dataframes
+    hourly_df = pd.merge(cannabis_hourly, mood_hourly, on='dt', how='outer')
+    
+    # Sort by datetime
+    hourly_df = hourly_df.sort_values('dt')
+    
+    # Replace NaN with 0 for cannabis_grams and with the overall mean for mood_score
+    hourly_df['cannabis_grams'] = hourly_df['cannabis_grams'].fillna(0)
+    hourly_df['mood_score'] = hourly_df['mood_score'].fillna(hourly_df['mood_score'].mean())
+    
+    return hourly_df
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def main():
+    st.title("Cannabis Use and Mood Tracker")
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    # Hard-coded user ID (you can modify this to allow user input if needed)
+    user_id = "7172032887"
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Update data
+    df = update_user_data(user_id)
 
-    return gdp_df
+    if df is not None:
+        # Get quantitative metrics
+        quant_df = get_quantitative_metrics(df)
+        
+        # Display raw data
+        st.subheader("Raw Data")
+        st.write(quant_df)
+        
+        # Aggregate data hourly
+        hourly_df = aggregate_hourly(quant_df)
+        
+        # Display aggregated data
+        st.subheader("Hourly Aggregated Data")
+        st.write(hourly_df)
 
-gdp_df = get_gdp_data()
+        # Create line charts
+        st.subheader("Quantitative Metrics Over Time (Hourly)")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[gdp_df['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+        # Cannabis Use Chart
+        st.subheader("Cannabis Use Over Time (grams per hour)")
+        st.line_chart(
+            hourly_df,
+            x='dt',
+            y='cannabis_grams',
+            x_label='Date',
+            y_label='Cannabis Use (grams)',
+            use_container_width=True
         )
+
+        # Mood Score Chart
+        st.subheader("Average Mood Score Over Time (per hour)")
+        st.line_chart(
+            hourly_df,
+            x='dt',
+            y='mood_score',
+            x_label='Date',
+            y_label='Mood Score',
+            use_container_width=True
+        )
+
+    else:
+        st.write("No data available for the user.")
+
+if __name__ == "__main__":
+    main()
