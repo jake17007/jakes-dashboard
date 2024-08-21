@@ -1,10 +1,10 @@
-# File: streamlit_app.py
-
 import streamlit as st
 import pandas as pd
 from cannabis_mood_tracker import update_user_data, get_quantitative_metrics, initialize_firebase
 import os
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
+import altair as alt
 
 # Load environment variables
 load_dotenv()
@@ -31,40 +31,85 @@ def aggregate_data(df, granularity):
     elif granularity == 'Daily':
         df['period'] = df['dt'].dt.floor('D')
     elif granularity == 'Weekly':
-        df['period'] = df['dt'].dt.to_period('W').apply(lambda r: r.start_time)
+        df['period'] = df['dt'].to_period('W').apply(lambda r: r.start_time)
     elif granularity == 'Minutely':
         df['period'] = df['dt'].dt.floor('T')
     
-    # Separate dataframes for cannabis use and mood score
-    cannabis_df = df[df['event_type'] == 'cannabis_use_since_last_update_grams']
-    mood_df = df[df['event_type'] == 'mood_score']
+    # Separate dataframes for different metrics
+    metrics = {
+        'cannabis_use_since_last_update_grams': 'cannabis_grams',
+        'mood_score': 'mood_score',
+        'monthly_cashflow_income': 'monthly_cashflow_income',
+        'monthly_cashflow_expenses': 'monthly_cashflow_expenses',
+        'monthly_cashflow_savings': 'monthly_cashflow_savings',
+        'monthly_cashflow_savings_rate': 'monthly_cashflow_savings_rate'
+    }
     
-    # Convert 'value' to numeric, coercing errors to NaN
-    cannabis_df['value'] = pd.to_numeric(cannabis_df['value'], errors='coerce')
-    mood_df['value'] = pd.to_numeric(mood_df['value'], errors='coerce')
+    aggregated_dfs = []
+
+    for event_type, column_name in metrics.items():
+        metric_df = df[df['event_type'] == event_type]
+        
+        if not metric_df.empty:
+            metric_df['value'] = pd.to_numeric(metric_df['value'], errors='coerce')
+            
+            if event_type == 'cannabis_use_since_last_update_grams':
+                agg_df = metric_df.groupby('period')['value'].sum().reset_index()
+            elif event_type == 'mood_score':
+                agg_df = metric_df.groupby('period')['value'].mean().reset_index()
+            else:
+                agg_df = metric_df.groupby('period').last().reset_index()
+            
+            # Ensure we only have 'period' and 'value' columns
+            agg_df = agg_df[['period', 'value']]
+            agg_df.columns = ['dt', column_name]
+            aggregated_dfs.append(agg_df)
+        else:
+            # If no data for this metric, create an empty DataFrame with the correct columns
+            agg_df = pd.DataFrame(columns=['dt', column_name])
+            aggregated_dfs.append(agg_df)
     
-    # Aggregate cannabis use (sum for each period)
-    cannabis_agg = cannabis_df.groupby('period')['value'].sum().reset_index()
-    cannabis_agg.columns = ['dt', 'cannabis_grams']
-    
-    # Aggregate mood score (average for each period)
-    mood_agg = mood_df.groupby('period')['value'].mean().reset_index()
-    mood_agg.columns = ['dt', 'mood_score']
-    
-    # Merge the two aggregated dataframes
-    agg_df = pd.merge(cannabis_agg, mood_agg, on='dt', how='outer')
+    # Merge all aggregated dataframes
+    final_df = aggregated_dfs[0]
+    for df in aggregated_dfs[1:]:
+        final_df = pd.merge(final_df, df, on='dt', how='outer')
     
     # Sort by datetime
-    agg_df = agg_df.sort_values('dt')
+    final_df = final_df.sort_values('dt')
     
-    # Replace NaN with 0 for cannabis_grams and with the overall mean for mood_score
-    agg_df['cannabis_grams'] = agg_df['cannabis_grams'].fillna(0)
-    agg_df['mood_score'] = agg_df['mood_score'].fillna(agg_df['mood_score'].mean())
+    # Replace NaN with appropriate values
+    final_df['cannabis_grams'] = final_df['cannabis_grams'].fillna(0)
+    final_df['mood_score'] = final_df['mood_score'].fillna(final_df['mood_score'].mean())
     
-    return agg_df
+    # For financial metrics, forward fill (use the last known value)
+    financial_columns = ['monthly_cashflow_income', 'monthly_cashflow_expenses', 
+                         'monthly_cashflow_savings', 'monthly_cashflow_savings_rate']
+    final_df[financial_columns] = final_df[financial_columns].ffill()
+    
+    return final_df
+
+def safe_plot(df, x, y, title):
+    if y in df.columns:
+        # Make sure NaN values are preserved to create gaps
+        chart_data = df[[x, y]].copy()
+        chart_data['dt'] = pd.to_datetime(chart_data['dt'])
+
+        # Use Altair to create a line chart with points and rotated x-axis labels
+        chart = alt.Chart(chart_data).mark_line(point=True).encode(
+            x=alt.X(x, title='Date', type='temporal', axis=alt.Axis(format='%Y-%m-%d %H:%M', labelAngle=-45)),
+            y=alt.Y(y, title=y.replace('_', ' ').title())
+        ).properties(
+            title=title,
+            width='container',
+            height=400
+        )
+        
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.warning(f"Column {y} not found in the data")
 
 def main():
-    st.title("Cannabis Use and Mood Tracker")
+    st.title("Jake's Dashboard")
 
     # Hard-coded user ID (you can modify this to allow user input if needed)
     user_id = "7172032887"
@@ -76,53 +121,39 @@ def main():
         # Get quantitative metrics
         quant_df = get_quantitative_metrics(df)
         
-        # Display raw data
-        st.subheader("Raw Data")
-        st.write(quant_df)
-        
-        # Period granularity selection
+        # Period granularity selection (default to Hourly)
         st.subheader("Select Period Granularity")
-        granularity = st.selectbox("Granularity", ['Minutely', 'Hourly', 'Daily', 'Weekly'])
+        granularity = st.selectbox("Granularity", ['Hourly', 'Minutely', 'Daily', 'Weekly'], index=0)
         
         # Aggregate data based on the selected granularity
         aggregated_df = aggregate_data(quant_df, granularity)
         
-        # Date range selection
+        # Date range selection (default to past 7 days)
         st.subheader("Select Date Range")
-        min_date = st.date_input("Start date", value=aggregated_df['dt'].min().date())
-        max_date = st.date_input("End date", value=aggregated_df['dt'].max().date())
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=7)
+        min_date = st.date_input("Start date", value=start_date, max_value=end_date)
+        max_date = st.date_input("End date", value=end_date, min_value=min_date, max_value=end_date)
 
         # Filter the dataframe based on the selected dates
         filtered_df = aggregated_df[(aggregated_df['dt'].dt.date >= min_date) & (aggregated_df['dt'].dt.date <= max_date)]
+
+        # Create line charts
+        safe_plot(filtered_df, 'dt', 'cannabis_grams', f"Cannabis Use Over Time (grams per {granularity.lower()})")
+        safe_plot(filtered_df, 'dt', 'mood_score', f"Average Mood Score Over Time (per {granularity.lower()})")
         
+        st.subheader("Financial Metrics")
+        financial_metrics = ['monthly_cashflow_income', 'monthly_cashflow_expenses', 'monthly_cashflow_savings', 'monthly_cashflow_savings_rate']
+        for metric in financial_metrics:
+            safe_plot(filtered_df, 'dt', metric, metric.replace('_', ' ').title())
+
+        # Display raw data
+        st.subheader("Raw Data")
+        st.write(quant_df)
+
         # Display aggregated data
         st.subheader("Aggregated Data")
         st.write(filtered_df)
-
-        # Create line charts
-        st.subheader("Quantitative Metrics Over Time")
-
-        # Cannabis Use Chart
-        st.subheader(f"Cannabis Use Over Time (grams per {granularity.lower()})")
-        st.line_chart(
-            filtered_df,
-            x='dt',
-            y='cannabis_grams',
-            x_label='Date',
-            y_label=f'Cannabis Use (grams)',
-            use_container_width=True
-        )
-
-        # Mood Score Chart
-        st.subheader(f"Average Mood Score Over Time (per {granularity.lower()})")
-        st.line_chart(
-            filtered_df,
-            x='dt',
-            y='mood_score',
-            x_label='Date',
-            y_label='Mood Score',
-            use_container_width=True
-        )
 
     else:
         st.write("No data available for the user.")

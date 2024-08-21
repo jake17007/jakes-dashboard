@@ -1,5 +1,3 @@
-# File: cannabis_mood_tracker.py
-
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
@@ -124,8 +122,12 @@ def calculate(metric_name, metric_value):
         agent = MoodMetricAgent()
         return agent.process_metric(metric_value)
     else:
-        print(f"Unknown metric type: {metric_name}. Returning original value.")
-        return metric_value
+        # For financial metrics, we'll assume they're already numerical
+        try:
+            return float(metric_value)
+        except ValueError:
+            print(f"Warning: Couldn't convert '{metric_value}' to a float for {metric_name}. Returning 0.")
+            return 0.0
 
 def get_user_data_as_dataframe(user_id, db):
     print(f"Fetching data for user: {user_id}")
@@ -143,8 +145,14 @@ def get_user_data_as_dataframe(user_id, db):
     
     cannabis_use = user_data['state'].get('cannabis_use_since_last_update', {})
     mood = user_data['state'].get('mood', {})
+    monthly_cashflow_income = user_data['state'].get('monthly_cashflow_income', {})
+    monthly_cashflow_expenses = user_data['state'].get('monthly_cashflow_expenses', {})
+    monthly_cashflow_savings = user_data['state'].get('monthly_cashflow_savings', {})
+    monthly_cashflow_savings_rate = user_data['state'].get('monthly_cashflow_savings_rate', {})
     
-    print(f"Found {len(cannabis_use)} cannabis use entries and {len(mood)} mood entries")
+    print(f"Found {len(cannabis_use)} cannabis use entries, {len(mood)} mood entries, "
+          f"{len(monthly_cashflow_income)} income entries, {len(monthly_cashflow_expenses)} expenses entries, "
+          f"{len(monthly_cashflow_savings)} savings entries, and {len(monthly_cashflow_savings_rate)} savings rate entries")
     
     # Load existing CSV data from local file
     csv_filename = f"user_{user_id}_data.csv"
@@ -189,6 +197,26 @@ def get_user_data_as_dataframe(user_id, db):
                 'value': processed_value
             })
     
+    # Process financial metrics individually
+    financial_metrics = [
+        ('monthly_cashflow_income', monthly_cashflow_income),
+        ('monthly_cashflow_expenses', monthly_cashflow_expenses),
+        ('monthly_cashflow_savings', monthly_cashflow_savings),
+        ('monthly_cashflow_savings_rate', monthly_cashflow_savings_rate)
+    ]
+
+    for metric_name, metric_data in financial_metrics:
+        for date, value in metric_data.items():
+            dt = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
+            if not ((existing_df['dt'] == dt) & (existing_df['event_type'] == metric_name)).any():
+                print(f"Processing new {metric_name} entry for date: {date}")
+                processed_value = calculate(metric_name, value)
+                df_data.append({
+                    'dt': dt,
+                    'event_type': metric_name,
+                    'value': processed_value
+                })
+    
     new_df = pd.DataFrame(df_data)
     if not new_df.empty:
         new_df = new_df.sort_values('dt')
@@ -220,4 +248,11 @@ def update_user_data(user_id):
     return df
 
 def get_quantitative_metrics(df):
-    return df[df['event_type'].isin(['cannabis_use_since_last_update_grams', 'mood_score'])]
+    return df[df['event_type'].isin([
+        'cannabis_use_since_last_update_grams', 
+        'mood_score',
+        'monthly_cashflow_income',
+        'monthly_cashflow_expenses',
+        'monthly_cashflow_savings',
+        'monthly_cashflow_savings_rate'
+    ])]
