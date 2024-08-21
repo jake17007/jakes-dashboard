@@ -128,15 +128,16 @@ def main():
         # Aggregate data based on the selected granularity
         aggregated_df = aggregate_data(quant_df, granularity)
         
-        # Date range selection (default to past 7 days)
+        # Date range selection
         st.subheader("Select Date Range")
-        end_date = datetime.now().date()
+        end_date = datetime.now().date() + timedelta(days=1)
         start_date = end_date - timedelta(days=7)
-        min_date = st.date_input("Start date", value=start_date, max_value=end_date)
-        max_date = st.date_input("End date", value=end_date, min_value=min_date, max_value=end_date)
+        min_date = st.date_input("Start date", value=start_date)
+        max_date = st.date_input("End date", value=end_date, min_value=min_date)
 
-        # Filter the dataframe based on the selected dates
-        filtered_df = aggregated_df[(aggregated_df['dt'].dt.date >= min_date) & (aggregated_df['dt'].dt.date <= max_date)]
+        # Adjust the filter to start from the next day after the selected start date
+        adjusted_start_date = min_date + timedelta(days=1)
+        filtered_df = aggregated_df[(aggregated_df['dt'].dt.date >= adjusted_start_date) & (aggregated_df['dt'].dt.date <= max_date)]
 
         # Create line charts
         safe_plot(filtered_df, 'dt', 'cannabis_grams', f"Cannabis Use Over Time (grams per {granularity.lower()})")
